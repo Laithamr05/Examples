@@ -1,1 +1,181 @@
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
+/*
+ * ExecutorService VS CompletableFuture
+ * ====================================
+ *
+ * ExecutorService + Future
+ *   - submit() returns a Future<T>.
+ *   - The only way to get the result is future.get(), which BLOCKS the caller.
+ *   - No built-in way to chain steps ("when A is done, do B") or to combine
+ *     two futures: you call get() on each and continue by hand.
+ *   - Exceptions come back wrapped in ExecutionException when you call get().
+ *
+ * CompletableFuture (Java 8+)
+ *   - Still runs tasks on an executor (ForkJoinPool.commonPool() by default,
+ *     or any ExecutorService you pass in), so it builds ON TOP of executors.
+ *   - Non-blocking pipelines: thenApply, thenAccept, thenCompose, thenCombine.
+ *   - Declarative error handling: exceptionally, handle, whenComplete.
+ *   - Wait for many tasks at once: allOf, anyOf.
+ *   - Can be completed manually with complete() / completeExceptionally().
+ *
+ * Rule of thumb: ExecutorService decides WHERE tasks run;
+ *                CompletableFuture describes WHAT happens when they finish.
+ *
+ * Example scenario: an order total = price + shipping, both fetched from slow
+ * "services", then a discount is applied.
+ *
+ * Run it:  java --source 8 "ExecutorService VS CompletableFuture"
+ */
+public class ExecutorServiceVsCompletableFuture {
+
+    public static void main(String[] args) throws Exception {
+        withExecutorService();
+        withCompletableFuture();
+        errorHandling();
+    }
+
+    // 1) ExecutorService + Future: start in parallel, but combine by blocking.
+    private static void withExecutorService() throws InterruptedException, ExecutionException {
+        System.out.println("=== ExecutorService + Future ===");
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            Future<Double> price = pool.submit(() -> fetchPrice());
+            Future<Double> shipping = pool.submit(() -> fetchShipping());
+
+            // The main thread is stuck here until BOTH results are ready.
+            double total = price.get() + shipping.get();
+            double finalTotal = applyDiscount(total);
+            System.out.println("Total: " + finalTotal + "\n");
+        } finally {
+            pool.shutdown();
+        }
+    }
+
+    // 2) CompletableFuture: describe the pipeline, react when results arrive.
+    private static void withCompletableFuture() {
+        System.out.println("=== CompletableFuture ===");
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            CompletableFuture<Double> price =
+                    CompletableFuture.supplyAsync(() -> fetchPrice(), pool);
+            CompletableFuture<Double> shipping =
+                    CompletableFuture.supplyAsync(() -> fetchShipping(), pool);
+
+            CompletableFuture<Void> pipeline = price
+                    .thenCombine(shipping, Double::sum)       // combine two async results
+                    .thenApply(total -> applyDiscount(total)) // transform the result
+                    .thenAccept(total -> System.out.println("Total: " + total));
+
+            System.out.println("main is free to do other work while the pipeline runs...");
+            pipeline.join();                                  // wait only at the very end
+            System.out.println();
+        } finally {
+            pool.shutdown();
+        }
+    }
+
+    // 3) Handling failures in each style.
+    private static void errorHandling() throws InterruptedException {
+        System.out.println("=== Error handling ===");
+
+        // ExecutorService: try/catch around a blocking get().
+        ExecutorService pool = Executors.newSingleThreadExecutor();
+        try {
+            Future<Double> failing = pool.submit(() -> failingService());
+            failing.get();
+        } catch (ExecutionException e) {
+            System.out.println("ExecutorService caught: " + e.getCause().getMessage());
+        } finally {
+            pool.shutdown();
+        }
+
+        // CompletableFuture: recover inside the pipeline with a fallback value.
+        double total = CompletableFuture
+                .supplyAsync(() -> failingService())
+                .exceptionally(ex -> {
+                    System.out.println("CompletableFuture recovered from: " + ex.getCause().getMessage());
+                    return 0.0;                               // fallback value
+                })
+                .join();
+        System.out.println("CompletableFuture result after recovery: " + total);
+    }
+
+    // ---- Simulated slow services ------------------------------------------------
+
+    private static double fetchPrice() {
+        log("fetching price");
+        sleep(500);
+        return 100.0;
+    }
+
+    private static double fetchShipping() {
+        log("fetching shipping");
+        sleep(300);
+        return 20.0;
+    }
+
+    private static double applyDiscount(double total) {
+        log("applying 10% discount to " + total);
+        return total * 0.9;
+    }
+
+    private static double failingService() {
+        throw new IllegalStateException("service unavailable");
+    }
+
+    private static void log(String message) {
+        System.out.println("  [" + Thread.currentThread().getName() + "] " + message);
+    }
+
+    private static void sleep(long millis) {
+        try {
+            Thread.sleep(millis);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+}
+
+/*
+ * Expected output (thread names and ordering may vary):
+ *
+ * === ExecutorService + Future ===
+ *   [pool-1-thread-1] fetching price
+ *   [pool-1-thread-2] fetching shipping
+ *   [main] applying 10% discount to 120.0
+ * Total: 108.0
+ *
+ * === CompletableFuture ===
+ *   [pool-2-thread-1] fetching price
+ *   [pool-2-thread-2] fetching shipping
+ * main is free to do other work while the pipeline runs...
+ *   [pool-2-thread-1] applying 10% discount to 120.0
+ * Total: 108.0
+ *
+ * === Error handling ===
+ * ExecutorService caught: service unavailable
+ * CompletableFuture recovered from: service unavailable
+ * CompletableFuture result after recovery: 0.0
+ *
+ * Note: in the ExecutorService version the discount runs on "main" because
+ * main had to block and wait; in the CompletableFuture version it runs on a
+ * pool thread as soon as the results are ready, without blocking main.
+ *
+ * Summary
+ * ---------------------------------------------------------------------------
+ *                     | ExecutorService + Future  | CompletableFuture
+ * --------------------+---------------------------+--------------------------
+ *  Getting the result | get() - blocking          | thenApply/thenAccept - non-blocking
+ *  Chaining steps     | Manual, after get()       | thenApply, thenCompose
+ *  Combining tasks    | get() each one by hand    | thenCombine, allOf, anyOf
+ *  Error handling     | try/catch ExecutionException | exceptionally, handle
+ *  Manual completion  | Not possible              | complete(), completeExceptionally()
+ *  Thread pool        | Is the thread pool        | Uses one (common pool or yours)
+ *  Best for           | Simple fire-and-get tasks | Async workflows / pipelines
+ * ---------------------------------------------------------------------------
+ */
