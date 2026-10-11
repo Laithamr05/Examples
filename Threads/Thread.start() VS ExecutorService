@@ -1,157 +1,26 @@
-import java.util.ArrayList;
-import java.util.List;
-import java.util.concurrent.Callable;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
 
-/*
- * Thread.start() VS ExecutorService
- * =================================
- *
- * new Thread(task).start()
- *   - Creates a brand-new OS thread for EVERY task (expensive to create/destroy).
- *   - No limit on how many threads exist: 10,000 tasks = 10,000 threads.
- *   - Runnable only: no return value, checked exceptions can't be thrown.
- *   - You manage the lifecycle yourself (join(), interrupt(), ...).
- *
- * ExecutorService (thread pool)
- *   - Keeps a pool of worker threads and REUSES them for many tasks.
- *   - Limits concurrency (e.g. a fixed pool of 2 threads); extra tasks wait in a queue.
- *   - Accepts Runnable AND Callable; submit() returns a Future, so you can get
- *     a result, catch the task's exception, cancel it, or wait with a timeout.
- *   - Central lifecycle: shutdown(), shutdownNow(), awaitTermination().
- *   - Separates WHAT to run (the task) from HOW it runs (the executor).
- *
- * Rule of thumb: use a raw Thread for a quick one-off demo;
- *                use an ExecutorService for real applications.
- *
- * Run it:  java --source 8 "Thread.start() VS ExecutorService"
- */
+// Thread.start():  creates a new thread for every task and returns no result.
+// ExecutorService: reuses a pool of threads and returns results with a Future.
 public class ThreadVsExecutorService {
 
-    private static final int TASKS = 5;
-
     public static void main(String[] args) throws Exception {
-        rawThreads();
-        executorService();
-        resultsAndExceptions();
+        withThread();
+        withExecutor();
     }
 
-    // 1) Thread.start(): one new thread per task.
-    private static void rawThreads() throws InterruptedException {
-        System.out.println("=== Thread.start() ===");
-        List<Thread> threads = new ArrayList<>();
-        for (int i = 1; i <= TASKS; i++) {
-            int id = i;
-            Thread t = new Thread(() -> work(id));
-            threads.add(t);
-            t.start();
-        }
-        for (Thread t : threads) {
-            t.join();                       // must wait for each thread manually
-        }
-        System.out.println(TASKS + " tasks -> " + TASKS + " different threads were created\n");
-    }
-
-    // 2) ExecutorService: a small pool of threads is reused for all tasks.
-    private static void executorService() throws InterruptedException {
-        System.out.println("=== ExecutorService (fixed pool of 2) ===");
-        ExecutorService pool = Executors.newFixedThreadPool(2);
-        for (int i = 1; i <= TASKS; i++) {
-            int id = i;
-            pool.execute(() -> work(id));   // queued if both threads are busy
-        }
-        pool.shutdown();                    // stop accepting new tasks
-        pool.awaitTermination(5, TimeUnit.SECONDS);
-        System.out.println(TASKS + " tasks -> only 2 threads were created and reused\n");
-    }
-
-    // 3) Getting results and exceptions back.
-    private static void resultsAndExceptions() throws InterruptedException {
-        System.out.println("=== Results & exceptions ===");
-
-        // With a raw Thread there is no return value: you need a shared variable.
-        final int[] holder = new int[1];
-        Thread t = new Thread(() -> holder[0] = square(7));
+    static void withThread() throws InterruptedException {
+        Thread t = new Thread(() -> System.out.println("Thread: " + Thread.currentThread().getName()));
         t.start();
         t.join();
-        System.out.println("Thread result via shared variable: " + holder[0]);
-
-        // With an ExecutorService a Callable returns its value through a Future.
-        ExecutorService pool = Executors.newSingleThreadExecutor();
-        try {
-            Future<Integer> ok = pool.submit(() -> square(7));
-            System.out.println("Future result: " + ok.get());
-
-            Callable<Integer> failing = () -> {
-                throw new IllegalStateException("something went wrong");
-            };
-            Future<Integer> bad = pool.submit(failing);
-            try {
-                bad.get();
-            } catch (ExecutionException e) {
-                // The task's exception is captured and handed back to the caller.
-                System.out.println("Future exception: " + e.getCause());
-            }
-        } catch (ExecutionException e) {
-            throw new RuntimeException(e);
-        } finally {
-            pool.shutdown();
-        }
     }
 
-    private static void work(int id) {
-        System.out.println("  task " + id + " running on " + Thread.currentThread().getName());
-        try {
-            Thread.sleep(100);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-    }
-
-    private static int square(int n) {
-        return n * n;
+    static void withExecutor() throws Exception {
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        Future<Integer> result = pool.submit(() -> 5 * 5);
+        System.out.println("ExecutorService result: " + result.get());
+        pool.shutdown();
     }
 }
-
-/*
- * Expected output (order within each section may vary):
- *
- * === Thread.start() ===
- *   task 1 running on Thread-0
- *   task 2 running on Thread-1
- *   task 3 running on Thread-2
- *   task 4 running on Thread-3
- *   task 5 running on Thread-4
- * 5 tasks -> 5 different threads were created
- *
- * === ExecutorService (fixed pool of 2) ===
- *   task 1 running on pool-1-thread-1
- *   task 2 running on pool-1-thread-2
- *   task 3 running on pool-1-thread-1
- *   task 4 running on pool-1-thread-2
- *   task 5 running on pool-1-thread-1
- * 5 tasks -> only 2 threads were created and reused
- *
- * === Results & exceptions ===
- * Thread result via shared variable: 49
- * Future result: 49
- * Future exception: java.lang.IllegalStateException: something went wrong
- *
- * Summary
- * ---------------------------------------------------------------------------
- *                        | Thread.start()            | ExecutorService
- * -----------------------+---------------------------+-----------------------
- *  Threads created       | One per task              | Fixed/managed pool, reused
- *  Creation overhead     | Paid on every task        | Paid once per pool thread
- *  Concurrency limit     | None (can exhaust memory) | Configurable pool size
- *  Task types            | Runnable                  | Runnable and Callable
- *  Return value          | None                      | Future<T>.get()
- *  Exception handling    | Lost / uncaught handler   | Wrapped in ExecutionException
- *  Cancel / timeout      | Manual (interrupt, join)  | future.cancel(), get(timeout)
- *  Shutdown              | Join each thread yourself | shutdown(), awaitTermination()
- * ---------------------------------------------------------------------------
- */
