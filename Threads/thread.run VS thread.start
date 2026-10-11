@@ -1,103 +1,12 @@
-/*
- * thread.run() VS thread.start()
- * ==============================
- *
- * thread.start()
- *   - Asks the JVM to create a NEW thread of execution.
- *   - The JVM then calls run() on that new thread.
- *   - Returns immediately: the caller and the new thread run concurrently.
- *   - Can be called only ONCE per Thread object; a second call throws
- *     IllegalThreadStateException.
- *
- * thread.run()
- *   - Is just a normal method call. NO new thread is created.
- *   - The code inside run() executes on the CURRENT (calling) thread.
- *   - Blocks the caller until run() finishes (synchronous).
- *   - Can be called as many times as you like.
- *
- * Rule of thumb: override run() to define WHAT the thread does,
- *                call start() to actually run it in parallel.
- *
- * Run it:  java --source 8 "thread.run VS thread.start"
- */
+// run():   a normal method call, runs on the CURRENT thread (no new thread).
+// start(): creates a NEW thread, which then calls run() in parallel.
 public class RunVsStart {
 
     public static void main(String[] args) throws InterruptedException {
-        Runnable task = () -> {
-            for (int i = 1; i <= 3; i++) {
-                System.out.println("  " + Thread.currentThread().getName() + " -> step " + i);
-                sleep(100);
-            }
-        };
+        Thread t = new Thread(() -> System.out.println("Running on: " + Thread.currentThread().getName()));
 
-        // 1) Calling run(): the task runs on "main", line by line, before moving on.
-        System.out.println("=== thread.run() ===");
-        Thread t1 = new Thread(task, "worker-1");
-        t1.run();                                   // plain method call, no new thread
-        System.out.println("main continues only AFTER run() returns");
-
-        // 2) Calling start(): the task runs on "worker-2", in parallel with main.
-        System.out.println("\n=== thread.start() ===");
-        Thread t2 = new Thread(task, "worker-2");
-        t2.start();                                 // new thread is created here
-        System.out.println("main continues IMMEDIATELY after start()");
-        for (int i = 1; i <= 3; i++) {
-            System.out.println("  main -> step " + i);
-            sleep(100);
-        }
-        t2.join();                                  // wait for worker-2 to finish
-
-        // 3) run() can be called again; start() cannot.
-        System.out.println("\n=== Calling them twice ===");
-        t1.run();                                   // fine: it's just a method call
-        System.out.println("run() called twice: OK");
-        try {
-            t2.start();                             // t2 has already been started
-        } catch (IllegalThreadStateException e) {
-            System.out.println("start() called twice: " + e);
-        }
-    }
-
-    private static void sleep(long millis) {
-        try {
-            Thread.sleep(millis);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
+        t.run();    // Running on: main
+        t.start();  // Running on: Thread-0
+        t.join();
     }
 }
-
-/*
- * Expected output (the order of the start() section may vary):
- *
- * === thread.run() ===
- *   main -> step 1
- *   main -> step 2
- *   main -> step 3
- * main continues only AFTER run() returns
- *
- * === thread.start() ===
- * main continues IMMEDIATELY after start()
- *   main -> step 1
- *   worker-2 -> step 1
- *   main -> step 2
- *   worker-2 -> step 2
- *   ...
- *
- * === Calling them twice ===
- *   main -> step 1
- *   ...
- * run() called twice: OK
- * start() called twice: java.lang.IllegalThreadStateException
- *
- * Summary
- * -------------------------------------------------------------------------
- *                      | run()                    | start()
- * ---------------------+--------------------------+------------------------
- *  New thread created? | No                       | Yes
- *  Runs on             | Calling thread           | Newly created thread
- *  Blocking?           | Yes (synchronous)        | No (asynchronous)
- *  Call multiple times | Allowed                  | IllegalThreadStateException
- *  Typical use         | Define the task's logic  | Execute the task concurrently
- * -------------------------------------------------------------------------
- */
